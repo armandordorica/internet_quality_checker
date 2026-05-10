@@ -22,6 +22,10 @@ from .data import results_df
 from .metrics import SEMAPHORE_COLORS, current_metric_statuses, rolling_ping_quality
 
 
+def _stop_requested(stop_signal):
+    return bool(stop_signal and stop_signal.is_set())
+
+
 def draw_status_badges(fig, statuses):
     if not statuses:
         fig.text(
@@ -137,8 +141,8 @@ def plot_results():
     plt.close(fig)
 
 
-async def plot_loop(stop_at):
-    while time.time() < stop_at:
+async def plot_loop(stop_at, stop_signal=None):
+    while time.time() < stop_at and not _stop_requested(stop_signal):
         clear_output(wait=True)
         plot_results()
         await asyncio.sleep(PLOT_REFRESH_SECONDS)

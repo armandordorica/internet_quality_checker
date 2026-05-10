@@ -23,6 +23,10 @@ from .data import results_df, samples
 from .labels import filename_label_from_network_name
 
 
+def _stop_requested(stop_signal):
+    return bool(stop_signal and stop_signal.is_set())
+
+
 def wifi_interfaces():
     """Return macOS device names for Wi-Fi hardware, such as en0 or en1."""
     try:
@@ -160,9 +164,9 @@ async def measure_upload_mbps(connection):
     return (UPLOAD_BYTES * 8) / elapsed / 1_000_000
 
 
-async def ping_loop(connection, stop_at):
+async def ping_loop(connection, stop_at, stop_signal=None):
     i = 0
-    while time.time() < stop_at:
+    while time.time() < stop_at and not _stop_requested(stop_signal):
         loop_started = time.perf_counter()
         endpoint = LATENCY_ENDPOINTS[i % len(LATENCY_ENDPOINTS)]
         samples.append(await tcp_ping_once(connection, endpoint))
@@ -171,10 +175,12 @@ async def ping_loop(connection, stop_at):
         await asyncio.sleep(max(0, PING_INTERVAL_SECONDS - elapsed))
 
 
-async def speed_loop(connection, stop_at):
+async def speed_loop(connection, stop_at, stop_signal=None):
     await asyncio.sleep(3)
-    while time.time() < stop_at:
+    while time.time() < stop_at and not _stop_requested(stop_signal):
         for direction, measure in (("download", measure_download_mbps), ("upload", measure_upload_mbps)):
+            if _stop_requested(stop_signal):
+                break
             row = {
                 "ts": _now_iso(),
                 "unix_ts": time.time(),
@@ -193,7 +199,9 @@ async def speed_loop(connection, stop_at):
                 row["ok"] = False
                 row["error"] = type(exc).__name__
             samples.append(row)
-        await asyncio.sleep(SPEED_INTERVAL_SECONDS)
+        sleep_until = time.time() + SPEED_INTERVAL_SECONDS
+        while time.time() < sleep_until and not _stop_requested(stop_signal):
+            await asyncio.sleep(min(1, sleep_until - time.time()))
 
 
 async def run_monitor(
@@ -201,6 +209,7 @@ async def run_monitor(
     duration_seconds=300,
     output_dir="internet_quality_results",
     reset_samples=True,
+    stop_signal=None,
 ):
     """Run latency and speed probes, live-plot results, and save a CSV at the end."""
     from .plotting import plot_loop
@@ -214,10 +223,13 @@ async def run_monitor(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     stop_at = time.time() + duration_seconds
 
-    tasks = [asyncio.create_task(plot_loop(stop_at))]
+    if stop_signal:
+        stop_signal.clear()
+
+    tasks = [asyncio.create_task(plot_loop(stop_at, stop_signal=stop_signal))]
     for connection in connections:
-        tasks.append(asyncio.create_task(ping_loop(connection, stop_at)))
-        tasks.append(asyncio.create_task(speed_loop(connection, stop_at)))
+        tasks.append(asyncio.create_task(ping_loop(connection, stop_at, stop_signal=stop_signal)))
+        tasks.append(asyncio.create_task(speed_loop(connection, stop_at, stop_signal=stop_signal)))
 
     await asyncio.gather(*tasks)
 
